@@ -1,0 +1,378 @@
+---
+title: "Demonstration: Regional Skills-Gap Divergence Score for Electricians"
+subtitle: "FIT5145 Assignment 3 - Characterising and Analysing Data: Demonstration"
+author: "Chinni Raja Ammela (36309591)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: false
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+```
+
+## 1. Purpose
+
+This notebook demonstrates the feasibility of the regional skills-gap early-warning
+system proposed in the project report. It uses **Electricians (ANZSCO 3411)** as a
+worked example occupation, combining:
+
+- **Demand side**: Jobs and Skills Australia's Internet Vacancy Index (IVI), monthly
+  online job advertisement counts (reported as a three-month moving average) by
+  occupation and JSA Remoteness classification.
+- **Supply side**: NCVER's Total VET students and courses 2025 program completions,
+  for the Electrotechnology (UEE, UTE, UTL) training package, by remoteness region.
+
+Both datasets are publicly available. Download links and access notes are provided
+in Section 2.
+
+## 2. Data sources
+
+```{r sources-table, echo=FALSE}
+sources_df <- data.frame(
+  Dataset = c("Internet Vacancy Index", "Total VET students and courses 2025: program completions"),
+  Source = c("Jobs and Skills Australia", "NCVER DataBuilder"),
+  Access = c("Free, no login, direct Excel download", "Free, no login, interactive table export"),
+  Link = c("jobsandskills.gov.au/data/internet-vacancy-index",
+           "ncver.edu.au/research-and-statistics/data/databuilder")
+)
+kable(sources_df, caption = "Table 1: Original data sources", format = "html", table.attr = 'class="table table-bordered"') %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50")
+```
+
+**Note on this demonstration's data files:** because NCVER's completions data is
+exported interactively from DataBuilder (not a static downloadable URL), the exact
+filtered extract used here (Training package = Electrotechnology, broken down by
+Remoteness region and Year) has been archived alongside the IVI extract in this
+project's public GitHub repository:
+https://github.com/CR-28/FIT5145-A3-skills-gap-demo
+
+Direct raw file links (for programmatic access):
+
+- IVI extract: https://raw.githubusercontent.com/CR-28/FIT5145-A3-skills-gap-demo/main/data/internet_vacancies_anzsco4_occupations_jsa_remoteness_and_northern_australia_classification_-_august_2026.xlsx
+- NCVER extract: https://raw.githubusercontent.com/CR-28/FIT5145-A3-skills-gap-demo/main/data/Total_VET_students_and_courses_2025.xlsx
+
+Both files are the original, unmodified downloads from their respective government
+sources (see table above); no values have been edited.
+
+**This document is self-contained.** When knitted, it downloads both files from the
+repository above automatically (if a local `data/` folder is present, that copy is
+used instead), so the `.Rmd` can be run on its own. An internet connection is
+needed the first time it runs.
+
+## 3. Loading and reshaping the data
+
+### 3.1 Internet Vacancy Index (demand side)
+
+```{r load-ivi}
+# Source files are hosted in the project's public GitHub repository.
+base_url <- "https://raw.githubusercontent.com/CR-28/FIT5145-A3-skills-gap-demo/main/data/"
+ivi_file  <- "internet_vacancies_anzsco4_occupations_jsa_remoteness_and_northern_australia_classification_-_august_2026.xlsx"
+ncver_file <- "Total_VET_students_and_courses_2025.xlsx"
+
+# Use a local copy in data/ if one exists; otherwise download the file to a temp location.
+get_data_file <- function(file_name) {
+  local_path <- file.path("data", file_name)
+  if (file.exists(local_path)) return(local_path)
+  tmp <- tempfile(fileext = ".xlsx")
+  download.file(paste0(base_url, file_name), destfile = tmp, mode = "wb", quiet = TRUE)
+  tmp
+}
+
+ivi_path <- get_data_file(ivi_file)
+
+ivi_raw <- read_excel(ivi_path, sheet = "JSA Remoteness", col_names = TRUE)
+
+# Filter to Electricians (ANZSCO 3411), reshape from wide (one column per month)
+# to long format, and derive calendar year from the Excel date serial number.
+elec_ivi <- ivi_raw %>%
+  filter(ANZSCO_CODE == "3411") %>%
+  select(-Level, -ANZSCO_CODE, -ANZSCO_TITLE) %>%
+  rename(remoteness = `JSA Remoteness`) %>%
+  pivot_longer(-remoteness, names_to = "date_serial", values_to = "vacancies") %>%
+  mutate(
+    date = as.Date(as.numeric(date_serial), origin = "1899-12-30"),
+    year = year(date)
+  )
+```
+
+```{r show-elec-ivi, echo=FALSE}
+elec_ivi %>% select(remoteness, date, vacancies) %>% head(6) %>%
+  kable(caption = "Table 2: First 6 rows of reshaped IVI data (long format)", format = "html", table.attr = 'class="table table-bordered"',
+        format.args = list(big.mark = ",")) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50")
+```
+
+### 3.2 Exploratory check: data coverage
+
+```{r eda-ivi}
+# Check monthly coverage is complete (no missing months) before aggregating to
+# annual totals - an incomplete year would bias the annual sum downward.
+coverage <- elec_ivi %>%
+  filter(year >= 2019, year <= 2025) %>%
+  count(remoteness, year, name = "n_months") %>%
+  pivot_wider(names_from = remoteness, values_from = n_months)
+```
+
+```{r show-coverage, echo=FALSE}
+coverage %>% mutate(year = as.character(year)) %>%
+  kable(caption = "Table 3: Monthly data coverage check (should be 12 for every year)", format = "html", table.attr = 'class="table table-bordered"') %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50")
+```
+
+```{r plot-raw, fig.width=8, fig.height=3.5, echo=FALSE}
+ggplot(elec_ivi, aes(x = date, y = vacancies, colour = remoteness)) +
+  geom_line(linewidth = 0.9) +
+  labs(title = "Raw monthly Electrician vacancies, by remoteness",
+       x = NULL, y = "Online job ads", colour = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+Every year from 2019-2025 has a full 12 months of data for both regions, so no
+interpolation or exclusion is needed before aggregating to annual totals. The raw
+series shows clear COVID-era volatility (a sharp 2020 dip, then a steep 2021-2022
+rebound), which motivates using **year-over-year growth rates** rather than raw
+levels for comparison with completions - growth rates make the two series comparable 
+even though they are measured in different units (online advertisements versus 
+completions).
+
+```{r annual-ivi}
+ivi_annual <- elec_ivi %>%
+  filter(year >= 2019, year <= 2025) %>%
+  group_by(remoteness, year) %>%
+  summarise(vacancies = sum(vacancies), .groups = "drop")
+```
+
+```{r show-ivi-annual, echo=FALSE}
+ivi_annual %>% pivot_wider(names_from = remoteness, values_from = vacancies) %>%
+  mutate(year = as.character(year)) %>%
+  kable(caption = "Table 4: Annual Electrician vacancies by remoteness, 2019-2025", format = "html", table.attr = 'class="table table-bordered"',
+        format.args = list(big.mark = ",")) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50")
+```
+
+**Note on the IVI values:** JSA reports the IVI as a three-month moving average of
+advertisements on three major online job boards. Summing the twelve monthly values for a
+year therefore gives a smoothed approximation of the annual advertisement count, not an
+exact total. Because the same treatment is applied to every year and region, growth
+rates remain comparable.
+
+2026 is excluded as it is a partial year (data to August only) and would distort
+a year-over-year growth calculation.
+
+### 3.3 NCVER completions (supply side)
+
+```{r load-ncver}
+ncver_path <- get_data_file(ncver_file)
+
+ncv_raw <- read_excel(ncver_path, sheet = "Pivot Data", col_names = FALSE)
+header <- as.character(unlist(ncv_raw[1, ]))
+data_rows <- ncv_raw[4:10, ]   # the 7 remoteness breakdown rows
+colnames(data_rows) <- header
+
+ncver_long <- data_rows %>%
+  rename(training_package = 2, remoteness_ncver = 3) %>%
+  select(-1) %>%
+  pivot_longer(-c(training_package, remoteness_ncver), names_to = "year", values_to = "completions") %>%
+  mutate(year = as.numeric(year), completions = as.numeric(completions))
+```
+
+```{r show-ncver-long, echo=FALSE}
+ncver_long %>% select(-training_package) %>%
+  pivot_wider(names_from = year, values_from = completions) %>%
+  rename(Remoteness = remoteness_ncver) %>%
+  kable(caption = "Table 5: Electrotechnology completions by remoteness region, 2019-2025", format = "html", table.attr = 'class="table table-bordered"',
+        format.args = list(big.mark = ",")) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50")
+```
+
+### 3.4 Harmonising geography
+
+IVI classifies regions as a binary **Major City / Regional** split. NCVER's
+DataBuilder exposes a finer 7-category remoteness classification. To join the two
+datasets, the NCVER categories are collapsed as follows:
+
+- `Major cities` -> **Major City**
+- `Inner regional`, `Outer regional`, `Remote`, `Very remote` -> **Regional**
+- `Offshore`, `Not known` -> **excluded** (together ~4.5% of total completions;
+  these do not correspond to any IVI remoteness category and cannot be reliably
+  allocated to either side of the binary split)
+
+```{r harmonise}
+ncver_annual <- ncver_long %>%
+  mutate(remoteness = case_when(
+    remoteness_ncver == "Major cities" ~ "Major City",
+    remoteness_ncver %in% c("Inner regional", "Outer regional", "Remote", "Very remote") ~ "Regional",
+    TRUE ~ "Exclude"
+  )) %>%
+  filter(remoteness != "Exclude") %>%
+  group_by(remoteness, year) %>%
+  summarise(completions = sum(completions), .groups = "drop")
+
+excl_pct <- ncver_long %>%
+  mutate(excl = remoteness_ncver %in% c("Offshore", "Not known")) %>%
+  summarise(pct = 100 * sum(completions[excl]) / sum(completions))
+```
+
+> **Share of completions excluded by harmonisation: `r round(excl_pct$pct, 1)`%**
+
+```{r show-ncver-annual, echo=FALSE}
+ncver_annual %>% pivot_wider(names_from = remoteness, values_from = completions) %>%
+  mutate(year = as.character(year)) %>%
+  kable(caption = "Table 6: Harmonised annual completions, Major City vs Regional", format = "html", table.attr = 'class="table table-bordered"',
+        format.args = list(big.mark = ",")) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50")
+```
+
+## 4. Combining demand and supply, and computing the divergence score
+
+```{r combine}
+combined <- ivi_annual %>%
+  inner_join(ncver_annual, by = c("remoteness", "year")) %>%
+  group_by(remoteness) %>%
+  arrange(year) %>%
+  mutate(
+    vacancy_growth    = (vacancies   - lag(vacancies))   / lag(vacancies)   * 100,
+    completion_growth = (completions - lag(completions)) / lag(completions) * 100,
+    divergence = vacancy_growth - completion_growth
+  ) %>%
+  ungroup()
+```
+
+```{r show-combined, echo=FALSE}
+combined %>%
+  rename(
+    Remoteness = remoteness, Year = year, Vacancies = vacancies, Completions = completions,
+    `Vacancy growth %` = vacancy_growth, `Completion growth %` = completion_growth,
+    `Divergence (pp)` = divergence
+  ) %>%
+  mutate(Year = as.character(Year)) %>%
+  kable(caption = "Table 7: Combined annual series with growth rates and divergence score", format = "html", table.attr = 'class="table table-bordered"',
+        digits = 1, format.args = list(big.mark = ",")) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50")
+```
+
+*NA = no prior year available for growth.*
+
+
+The **divergence score** is defined as:
+
+> **divergence (year t) = vacancy growth rate (year t) − completion growth rate (year t)**
+
+A positive score means vacancy demand grew faster than training completions 
+that year; a sustained positive and rising score signals a widening mismatch. 
+A negative score means completions grew faster than vacancies. This is the core
+novel contribution of the proposed system: existing resources compare demand and
+supply *levels*, but, to our knowledge, none computes or tracks this 
+*rate-of-change* signal over time.
+
+## 5. Visualising the result
+
+```{r plot-indexed, fig.width=9, fig.height=4.5}
+indexed <- combined %>%
+  group_by(remoteness) %>%
+  arrange(year) %>%
+  mutate(vac_index = vacancies / first(vacancies) * 100,
+         comp_index = completions / first(completions) * 100) %>%
+  select(remoteness, year, vac_index, comp_index) %>%
+  pivot_longer(c(vac_index, comp_index), names_to = "series", values_to = "index") %>%
+  mutate(series = recode(series, vac_index = "Vacancies (IVI)", comp_index = "Completions (NCVER)"))
+
+ggplot(indexed, aes(x = year, y = index, colour = series, linetype = series)) +
+  geom_line(linewidth = 1) + geom_point(size = 2) +
+  facet_wrap(~remoteness) +
+  labs(title = "Electricians: Vacancy Demand vs. Training Completions (Indexed, 2019 = 100)",
+       x = NULL, y = "Index (2019 = 100)", colour = NULL, linetype = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+```{r plot-divergence, fig.width=9, fig.height=4.5}
+div_data <- combined %>% filter(!is.na(divergence))
+
+ggplot(div_data, aes(x = year, y = divergence, colour = remoteness)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line(linewidth = 1) + geom_point(size = 2.5) +
+  geom_smooth(method = "lm", se = FALSE, linetype = "dotted", linewidth = 0.8) +
+  labs(title = "Divergence Score: Vacancy Growth minus Completion Growth",
+       subtitle = "Positive = demand outpacing training supply | Negative = supply catching up",
+       x = NULL, y = "Divergence score (percentage points)", colour = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom")
+```
+
+## 6. Trend analysis
+
+```{r trend}
+trend_results <- lapply(unique(combined$remoteness), function(r) {
+  sub <- combined %>% filter(remoteness == r, !is.na(divergence))
+  fit <- lm(divergence ~ year, data = sub)
+  s <- summary(fit)
+  data.frame(
+    Remoteness = r,
+    `Slope (pp/year)` = round(coef(fit)[2], 2),
+    `p-value` = round(s$coefficients[2, 4], 3),
+    `R-squared` = round(s$r.squared, 3),
+    n = nrow(sub),
+    check.names = FALSE,
+    row.names = NULL
+  )
+}) %>% bind_rows()
+rownames(trend_results) <- NULL
+```
+
+```{r show-trend, echo=FALSE}
+kable(trend_results, caption = "Table 8: Linear trend fit, divergence score ~ year, by region", format = "html", table.attr = 'class="table table-bordered"',
+      digits = 3, row.names = FALSE) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#2C3E50")
+```
+
+## 7. Interpretation
+
+For Electricians, the divergence score follows a consistent pattern in **both**
+Major City and Regional areas: a large positive spike in 2021 (vacancies rebounded
+far faster than training completions after the 2020 COVID dip), tapering through
+2022-2023, and turning **negative** from 2024 onward (completions now growing
+faster than vacancies in both regions). The fitted linear trend is negative for
+both regions (approximately -6.4 to -6.6 percentage points per year), consistent
+with a mismatch that is **narrowing** rather than widening over the observed
+period - the opposite direction to a worsening shortage, and a genuinely useful
+signal that a simple "current gap" comparison would not surface.
+
+**Statistical caveat:** with only six year-over-year observations per region, the
+trend slopes are not statistically significant at conventional thresholds
+(p = 0.52 for Major City, p = 0.31 for Regional), and R-squared is modest. This is
+expected given the sample size and the real-world volatility of the COVID-affected
+period. The method is presented here as a **directional, feasibility-level
+indicator** rather than a statistically validated forecast; a production version
+of this system would need longer and more granular (e.g., quarterly) series to
+support stronger statistical claims.
+
+## 8. Feasibility conclusion
+
+This demonstration confirms the core mechanism proposed in the project report is
+technically feasible with real, publicly available Australian data:
+
+1. Both data sources can be acquired, reshaped, and joined on a common
+   occupation/region/year key.
+2. A genuine divergence (rate-of-change) signal - not just a static level
+   comparison - can be computed and visualised.
+3. The resulting signal is interpretable and tells a substantively different
+   story than either raw series alone: it correctly identifies that the
+   Electricians training pipeline, after lagging during the COVID-era demand
+   surge, has since caught up and is now outpacing vacancy growth.
+
+A full production system would extend this single-occupation proof of concept
+across the full ANZSCO occupation set, automate the NCVER DataBuilder extraction,
+and incorporate quarterly or monthly completions data where available to improve
+statistical power.
